@@ -1,0 +1,388 @@
+// ============================================================================
+// BMS Pro Enterprise - Complete PostgreSQL Database Schema (Prisma ORM)
+// Covers all 21 core tables, foreign keys, composite indexes, and RBAC models
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum PersonnelStatus {
+  ACTIVE        // نشط
+  ON_LEAVE      // في إجازة
+  ON_MISSION    // مهمة ميدانية
+  ARCHIVED      // مؤرشف
+  DISABLED      // معطل دون حذف
+}
+
+enum AttendanceShift {
+  MORNING       // فترة صباحية
+  EVENING       // فترة مسائية
+}
+
+enum AttendanceStatus {
+  PRESENT       // حاضر
+  ABSENT        // غائب
+  LATE          // متأخر
+  EXCUSED       // بعذر
+}
+
+enum LeaveType {
+  REGULAR       // اعتيادية
+  ANNUAL        // سنوية
+  SICK          // مرضية
+  EMERGENCY     // طارئة
+}
+
+enum ApprovalStatus {
+  PENDING       // قيد المراجعة
+  APPROVED      // معتمدة
+  REJECTED      // مرفوضة
+}
+
+enum WeaponStatus {
+  IN_SERVICE    // بالخدمة
+  MAINTENANCE   // صيانة
+  STORED        // بالمخزن
+  DECOMMISSIONED
+}
+
+enum VehicleType {
+  TACTICAL_CAR  // سيارة تكتيكية
+  ARMORED       // مدرعة
+  TRUCK         // شاحنة إمداد
+  MOTORCYCLE    // دراجة عسكرية
+}
+
+// 1. Users Table
+model User {
+  id                 String    @id @default(uuid())
+  username           String    @unique
+  email              String    @unique
+  passwordHash       String    // bcrypt (12 rounds)
+  twoFactorSecret    String?   // AES-256 encrypted TOTP secret
+  twoFactorEnabled   Boolean   @default(false)
+  refreshTokenHash   String?
+  rememberMe         Boolean   @default(false)
+  isActive           Boolean   @default(true)
+  lastLoginAt        DateTime?
+  roleId             String
+  role               Role      @relation(fields: [roleId], references: [id])
+  personnelId        String?   @unique
+  personnel          Personnel? @relation(fields: [personnelId], references: [id])
+  logs               Log[]
+  notifications      Notification[]
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([roleId])
+  @@index([username, email])
+}
+
+// 2. Roles Table (14 Military Roles)
+model Role {
+  id          String       @id @default(uuid())
+  code        String       @unique // SYS_ADMIN, BRIGADE_CMD, OPS_CHIEF, HR_CHIEF, TRAINING_CHIEF, BATTALION_CMD, COMPANY_CMD, PLATOON_CMD, DUTY_OFFICER, TRAINING_OFFICER, SECURITY_OFFICER, ADMIN_OFFICER, CLERK, SOLDIER
+  nameAr      String
+  description String?
+  users       User[]
+  permissions Permission[] @relation("RolePermissions")
+  createdAt   DateTime     @default(now())
+}
+
+// 3. Permissions Table (Granular Screen & Action Permissions)
+model Permission {
+  id          String   @id @default(uuid())
+  code        String   @unique // canAddPersonnel, canEditPersonnel, canDeletePersonnel, canApproveLeave, canViewReports, canExportPDF, canManageWeapons, canManageVehicles, canManageUsers
+  nameAr      String
+  module      String
+  roles       Role[]   @relation("RolePermissions")
+}
+
+// 4. Units Table (Hierarchical: اللواء -> الكتيبة -> السرية -> الفصيل)
+model Unit {
+  id          String      @id @default(uuid())
+  code        String      @unique
+  nameAr      String
+  type        String      // BRIGADE, BATTALION, COMPANY, PLATOON
+  parentId    String?
+  parent      Unit?       @relation("UnitHierarchy", fields: [parentId], references: [id])
+  children    Unit[]      @relation("UnitHierarchy")
+  personnel   Personnel[]
+  readiness   Readiness[]
+  tasks       Task[]
+  createdAt   DateTime    @default(now())
+
+  @@index([parentId])
+}
+
+// 5. Ranks Table (الرتب العسكرية)
+model Rank {
+  id              String      @id @default(uuid())
+  nameAr          String      @unique
+  category        String      // OFFICER, NCO, ENLISTED
+  orderLevel      Int         @unique
+  annualLeaveDays Int         @default(30)
+  personnel       Personnel[]
+}
+
+// 6. Jobs Table (الوظائف والتخصصات العسكرية)
+model Job {
+  id          String      @id @default(uuid())
+  titleAr     String      @unique
+  code        String      @unique
+  personnel   Personnel[]
+}
+
+// 7. Personnel Table (الأفراد العسكريون)
+model Personnel {
+  id                 String              @id @default(uuid())
+  militaryId         String              @unique // الرقم العسكري الفريد
+  firstName          String
+  fatherName         String
+  grandFatherName    String
+  familyName         String
+  fullName           String              // البيانات الرباعية الكاملة
+  nationalIdEncrypted String             // مشفر بـ AES-256
+  bloodType          String              @default("O+")
+  photoUrl           String?
+  phoneEncrypted     String?             // مشفر بـ AES-256
+  status             PersonnelStatus     @default(ACTIVE)
+  disciplineScore    Int                 @default(100)
+  annualLeaveBalance Int                 @default(30)
+  rankId             String
+  rank               Rank                @relation(fields: [rankId], references: [id])
+  jobId              String
+  job                Job                 @relation(fields: [jobId], references: [id])
+  unitId             String
+  unit               Unit                @relation(fields: [unitId], references: [id])
+  user               User?
+  attendance         Attendance[]
+  leaves             Leave[]
+  permissions        PermissionRequest[]
+  weaponsAssigned    Weapon[]
+  vehiclesDriven     Vehicle[]
+  historyRecords     History[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([militaryId])
+  @@index([fullName])
+  @@index([unitId, status])
+  @@index([rankId])
+}
+
+// 8. Attendance Table (الحضور والانصراف - فترتا صباح ومساء + QR)
+model Attendance {
+  id          String           @id @default(uuid())
+  personnelId String
+  personnel   Personnel        @relation(fields: [personnelId], references: [id])
+  date        DateTime         @db.Date
+  shift       AttendanceShift
+  status      AttendanceStatus @default(PRESENT)
+  checkInTime DateTime?
+  method      String           @default("QR_CODE") // QR_CODE, MANUAL
+  notes       String?
+  createdAt   DateTime         @default(now())
+
+  @@unique([personnelId, date, shift])
+  @@index([date, shift, status])
+}
+
+// 9. Leaves Table (الإجازات الاعتيادية والمرضية والطارئة والسنوية)
+model Leave {
+  id          String         @id @default(uuid())
+  personnelId String
+  personnel   Personnel      @relation(fields: [personnelId], references: [id])
+  type        LeaveType
+  startDate   DateTime       @db.Date
+  endDate     DateTime       @db.Date
+  daysCount   Int
+  reason      String
+  status      ApprovalStatus @default(PENDING)
+  approvedBy  String?
+  createdAt   DateTime       @default(now())
+
+  @@index([personnelId, status])
+}
+
+// 10. PermissionRequests Table (الأذونات بالساعات أو الأيام)
+model PermissionRequest {
+  id          String         @id @default(uuid())
+  personnelId String
+  personnel   Personnel      @relation(fields: [personnelId], references: [id])
+  durationHrs Int
+  exitTime    DateTime
+  returnTime  DateTime
+  destination String
+  reason      String
+  status      ApprovalStatus @default(PENDING)
+  approvedBy  String?
+  createdAt   DateTime       @default(now())
+
+  @@index([personnelId, status])
+}
+
+// 11. Weapons Table (إدارة الأسلحة بالأرقام التسلسلية)
+model Weapon {
+  id              String       @id @default(uuid())
+  serialNumber    String       @unique
+  modelName       String
+  caliber         String
+  status          WeaponStatus @default(IN_SERVICE)
+  lastMaintenance DateTime?
+  assignedToId    String?
+  assignedTo      Personnel?   @relation(fields: [assignedToId], references: [id])
+  movementLog     Json         @default("[]")
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([serialNumber, status])
+}
+
+// 12. Ammunition Table (إدارة الذخائر بالعيار والوارد والمنصرف والمتبقي)
+model Ammunition {
+  id            String   @id @default(uuid())
+  caliber       String   @unique
+  incomingTotal Int      @default(0) // الوارد
+  outgoingTotal Int      @default(0) // المنصرف
+  remaining     Int      @default(0) // المتبقي
+  minThreshold  Int      @default(1000)
+  updatedAt     DateTime @updatedAt
+}
+
+// 13. Vehicles Table (السيارات والمدرعات والدراجات)
+model Vehicle {
+  id            String      @id @default(uuid())
+  plateNumber   String      @unique
+  vehicleType   VehicleType
+  modelName     String
+  engineNumber  String      @unique
+  chassisNumber String      @unique
+  fuelLevelPct  Int         @default(100)
+  status        String      @default("ACTIVE")
+  driverId      String?
+  driver        Personnel?  @relation(fields: [driverId], references: [id])
+  faultLogs     Json        @default("[]")
+  lastServiceAt DateTime?
+  createdAt     DateTime    @default(now())
+
+  @@index([plateNumber, status])
+}
+
+// 14. Tasks Table (التدريب والمهام والدورات)
+model Task {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  category    String   // MISSION, TRAINING, FITNESS, SHOOTING
+  priority    String   @default("HIGH")
+  progressPct Int      @default(0)
+  status      String   @default("IN_PROGRESS")
+  unitId      String
+  unit        Unit     @relation(fields: [unitId], references: [id])
+  dueDate     DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([unitId, status])
+}
+
+// 15. Announcements Table (البلاغات والتعميمات العملياتية)
+model Announcement {
+  id        String   @id @default(uuid())
+  title     String
+  body      String
+  severity  String   @default("NORMAL") // NORMAL, IMPORTANT, URGENT
+  author    String
+  createdAt DateTime @default(now())
+}
+
+// 16. Notifications Table (الإشعارات الفورية و FCM Push)
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  title     String
+  message   String
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+}
+
+// 17. Readiness Table (سجل الجاهزية القتالية والطقس)
+model Readiness {
+  id               String   @id @default(uuid())
+  unitId           String
+  unit             Unit     @relation(fields: [unitId], references: [id])
+  readinessPct     Int
+  presentForce     Int
+  absentForce      Int
+  alertLevel       String   @default("LEVEL_1")
+  weatherCondition String?
+  recordedAt       DateTime @default(now())
+
+  @@index([unitId, recordedAt])
+}
+
+// 18. Logs Table (سجل التدقيق الأمني Audit Log)
+model Log {
+  id        String   @id @default(uuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  module    String
+  ipAddress String?
+  userAgent String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// 19. History Table (السجل التاريخي لكل فرد)
+model History {
+  id          String    @id @default(uuid())
+  personnelId String
+  personnel   Personnel @relation(fields: [personnelId], references: [id])
+  eventType   String    // PROMOTION, TRANSFER, AWARD, DISCIPLINE
+  description String
+  eventDate   DateTime  @default(now())
+
+  @@index([personnelId, eventDate])
+}
+
+// 20. Backup Table (النسخ الاحتياطي المشفر بـ AES-256)
+model Backup {
+  id            String   @id @default(uuid())
+  fileName      String
+  sizeBytes     BigInt
+  encryptionAlg String   @default("AES-256-GCM")
+  checksumSha   String
+  isAutomated   Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+// 21. Trash Table (سلة المهملات للاستعادة أو الحذف النهائي)
+model Trash {
+  id           String   @id @default(uuid())
+  entityTable  String
+  entityId     String
+  snapshotJson Json
+  deletedBy    String
+  deletedAt    DateTime @default(now())
+
+  @@index([entityTable, deletedAt])
+}
+
+// 22. Settings Table (إعدادات النظام والشعار)
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
